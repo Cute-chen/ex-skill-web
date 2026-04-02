@@ -1,0 +1,8 @@
+settings.json
+exes/
+__pycache__/
+*.pyc
+.DS_Store
+backend/static/
+frontend/node_modules/
+frontend/dist/

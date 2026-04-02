@@ -1,0 +1,6 @@
+{
+  "provider": "claude",
+  "base_url": "https://api.anthropic.com",
+  "api_key": "",
+  "model": "claude-opus-4-6"
+}
