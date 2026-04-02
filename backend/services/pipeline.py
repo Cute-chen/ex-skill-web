@@ -21,6 +21,10 @@ _MAX_RETRIES = 3
 _RETRYABLE_HTTP_STATUS = {408, 409, 429, 500, 502, 503, 504}
 _FAST_CHUNK_CHAR_SIZE = 10_000
 _FAST_CHUNK_OVERLAP = 300
+_MIN_RETRY_CHUNK_CHAR_SIZE = 1_800
+_MAX_AUTO_SPLIT_DEPTH = 2
+_MIN_ALLOWED_FAILED_CHUNKS = 2
+_MAX_ALLOWED_FAILED_CHUNKS = 12
 
 
 def _split_text_chunks(text: str, size: int = _CHUNK_CHAR_SIZE, overlap: int = _CHUNK_OVERLAP) -> list[str]:
@@ -105,6 +109,159 @@ async def _complete_with_retry(
     if last_error:
         raise last_error
     raise RuntimeError("LLM 调用失败")
+
+
+def _format_error(err: Exception) -> str:
+    if isinstance(err, httpx.HTTPStatusError):
+        status = err.response.status_code if err.response is not None else "unknown"
+        text = ""
+        try:
+            body = (err.response.text or "").strip() if err.response is not None else ""
+            if body:
+                text = f" - {body[:120]}"
+        except Exception:
+            text = ""
+        return f"HTTPStatusError({status}){text}"
+
+    msg = str(err).strip()
+    if msg:
+        return f"{type(err).__name__}: {msg}"
+    return type(err).__name__
+
+
+def _allowed_failed_chunks(total_chunks: int) -> int:
+    if total_chunks <= 0:
+        return 0
+    # 允许极少量分块失败，避免大任务在随机抖动下整体失败
+    rough = max(_MIN_ALLOWED_FAILED_CHUNKS, total_chunks // 40)
+    return min(_MAX_ALLOWED_FAILED_CHUNKS, rough)
+
+
+def _split_for_retry(text: str) -> list[str]:
+    clean = (text or "").strip()
+    if not clean or len(clean) < _MIN_RETRY_CHUNK_CHAR_SIZE * 2:
+        return []
+    retry_size = max(_MIN_RETRY_CHUNK_CHAR_SIZE, len(clean) // 2)
+    retry_overlap = min(max(80, retry_size // 10), retry_size - 1)
+    return _split_text_chunks(clean, size=retry_size, overlap=retry_overlap)
+
+
+async def _analyze_chunk_once(
+    client,
+    *,
+    mode: str,
+    chunk_input: str,
+    memories_analyzer: str,
+    persona_analyzer: str,
+    dual_fast_prompt: str,
+    fallback_depth: int = 0,
+) -> tuple[list[str], list[str]]:
+    if mode == "fast":
+        combined_piece = await _complete_with_retry(
+            client,
+            system=dual_fast_prompt,
+            messages=[{"role": "user", "content": chunk_input}],
+            max_tokens=3200,
+        )
+        memories_piece, persona_piece = _parse_fast_dual_result(combined_piece)
+        return (
+            [memories_piece] if memories_piece else [],
+            [persona_piece] if persona_piece else [],
+        )
+
+    # 回退重试时改为串行，减少并发下的上游抖动
+    if fallback_depth > 0:
+        memories_piece = await _complete_with_retry(
+            client,
+            system=memories_analyzer,
+            messages=[{"role": "user", "content": chunk_input}],
+            max_tokens=4096,
+        )
+        persona_piece = await _complete_with_retry(
+            client,
+            system=persona_analyzer,
+            messages=[{"role": "user", "content": chunk_input}],
+            max_tokens=4096,
+        )
+    else:
+        memories_piece, persona_piece = await asyncio.gather(
+            _complete_with_retry(
+                client,
+                system=memories_analyzer,
+                messages=[{"role": "user", "content": chunk_input}],
+                max_tokens=4096,
+            ),
+            _complete_with_retry(
+                client,
+                system=persona_analyzer,
+                messages=[{"role": "user", "content": chunk_input}],
+                max_tokens=4096,
+            ),
+        )
+
+    return [memories_piece], [persona_piece]
+
+
+async def _analyze_chunk_with_auto_split(
+    client,
+    *,
+    mode: str,
+    base_input: str,
+    chunk: dict,
+    idx: int,
+    total_chunks: int,
+    memories_analyzer: str,
+    persona_analyzer: str,
+    dual_fast_prompt: str,
+) -> dict:
+    pending: list[tuple[str, int, int, int]] = [(chunk["text"], 0, 1, 1)]
+    memories_parts: list[str] = []
+    persona_parts: list[str] = []
+    split_rounds = 0
+
+    while pending:
+        text, depth, part_idx, part_total = pending.pop(0)
+        split_note = ""
+        if depth > 0:
+            split_note = f"（自动细分 {part_idx}/{part_total}，层级 {depth}）"
+        header = (
+            f"原材料分块信息：材料 {chunk['material_idx']}，"
+            f"分块 {chunk['chunk_idx']}/{chunk['chunk_total']}，"
+            f"全局 {idx}/{total_chunks}"
+            f"{split_note}"
+        )
+        chunk_input = f"{base_input}\n\n{header}\n\n原材料内容：\n{text}"
+
+        try:
+            mem_list, per_list = await _analyze_chunk_once(
+                client,
+                mode=mode,
+                chunk_input=chunk_input,
+                memories_analyzer=memories_analyzer,
+                persona_analyzer=persona_analyzer,
+                dual_fast_prompt=dual_fast_prompt,
+                fallback_depth=depth,
+            )
+            memories_parts.extend(mem_list)
+            persona_parts.extend(per_list)
+        except Exception as err:
+            sub_chunks = _split_for_retry(text)
+            if depth >= _MAX_AUTO_SPLIT_DEPTH or len(sub_chunks) <= 1:
+                return {
+                    "ok": False,
+                    "error": err,
+                    "split_rounds": split_rounds,
+                }
+            split_rounds += 1
+            next_batch = [(sub, depth + 1, i + 1, len(sub_chunks)) for i, sub in enumerate(sub_chunks)]
+            pending = next_batch + pending
+
+    return {
+        "ok": True,
+        "memories": memories_parts,
+        "personas": persona_parts,
+        "split_rounds": split_rounds,
+    }
 
 
 def _merge_prompt(analysis_type: str) -> str:
@@ -254,6 +411,9 @@ async def run_creation_pipeline(
 
     chunk_memories: list[str] = []
     chunk_personas: list[str] = []
+    failed_chunks: list[str] = []
+    auto_split_rounds = 0
+    max_failed_chunks = 0
 
     if not material_chunks:
         # 没有原材料时，仍允许仅根据 intake 生成
@@ -266,7 +426,7 @@ async def run_creation_pipeline(
                 max_tokens=4096,
             ))
         except Exception as e:
-            yield {"error": f"分析记忆失败：{e}"}
+            yield {"error": f"分析记忆失败：{_format_error(e)}"}
             return
 
         try:
@@ -278,61 +438,61 @@ async def run_creation_pipeline(
                 max_tokens=4096,
             ))
         except Exception as e:
-            yield {"error": f"分析性格失败：{e}"}
+            yield {"error": f"分析性格失败：{_format_error(e)}"}
             return
     else:
         total_chunks = len(material_chunks)
         dual_fast_prompt = _fast_dual_prompt() if mode == "fast" else ""
+        max_failed_chunks = _allowed_failed_chunks(total_chunks)
         for idx, chunk in enumerate(material_chunks, start=1):
             progress = 8 + int((idx - 1) / max(total_chunks, 1) * 42)
             stage_prefix = "极速分块提炼中" if mode == "fast" else "分块提炼中"
             stage = f"{stage_prefix} ({idx}/{total_chunks})"
             yield {"stage": stage, "progress": progress}
 
-            header = (
-                f"原材料分块信息：材料 {chunk['material_idx']}，"
-                f"分块 {chunk['chunk_idx']}/{chunk['chunk_total']}，"
-                f"全局 {idx}/{total_chunks}"
+            result = await _analyze_chunk_with_auto_split(
+                client,
+                mode=mode,
+                base_input=base_input,
+                chunk=chunk,
+                idx=idx,
+                total_chunks=total_chunks,
+                memories_analyzer=memories_analyzer,
+                persona_analyzer=persona_analyzer,
+                dual_fast_prompt=dual_fast_prompt,
             )
-            chunk_input = f"{base_input}\n\n{header}\n\n原材料内容：\n{chunk['text']}"
+            auto_split_rounds += result.get("split_rounds", 0)
 
-            if mode == "fast":
-                try:
-                    combined_piece = await _complete_with_retry(
-                        client,
-                        system=dual_fast_prompt,
-                        messages=[{"role": "user", "content": chunk_input}],
-                        max_tokens=3200,
+            if result.get("ok"):
+                chunk_memories.extend(result.get("memories", []))
+                chunk_personas.extend(result.get("personas", []))
+                continue
+
+            err = result.get("error")
+            detail = _format_error(err if isinstance(err, Exception) else Exception("未知错误"))
+            failed_chunks.append(f"分块 {idx}/{total_chunks}：{detail}")
+            if len(failed_chunks) > max_failed_chunks:
+                prefix = "极速分块分析失败过多" if mode == "fast" else "分块分析失败过多"
+                yield {
+                    "error": (
+                        f"{prefix}（失败 {len(failed_chunks)} 块，允许 {max_failed_chunks} 块）："
+                        f"{failed_chunks[-1]}"
                     )
-                    memories_piece, persona_piece = _parse_fast_dual_result(combined_piece)
-                    if memories_piece:
-                        chunk_memories.append(memories_piece)
-                    if persona_piece:
-                        chunk_personas.append(persona_piece)
-                except Exception as e:
-                    yield {"error": f"极速分块分析失败（分块 {idx}/{total_chunks}）：{e}"}
-                    return
-            else:
-                try:
-                    memories_piece, persona_piece = await asyncio.gather(
-                        _complete_with_retry(
-                            client,
-                            system=memories_analyzer,
-                            messages=[{"role": "user", "content": chunk_input}],
-                            max_tokens=4096,
-                        ),
-                        _complete_with_retry(
-                            client,
-                            system=persona_analyzer,
-                            messages=[{"role": "user", "content": chunk_input}],
-                            max_tokens=4096,
-                        ),
-                    )
-                    chunk_memories.append(memories_piece)
-                    chunk_personas.append(persona_piece)
-                except Exception as e:
-                    yield {"error": f"分块分析失败（分块 {idx}/{total_chunks}）：{e}"}
-                    return
+                }
+                return
+
+            yield {
+                "stage": (
+                    f"{stage_prefix} ({idx}/{total_chunks}) "
+                    f"该块失败已跳过（{len(failed_chunks)}/{max_failed_chunks}）"
+                ),
+                "progress": progress,
+            }
+
+    if not chunk_memories or not chunk_personas:
+        seed = failed_chunks[0] if failed_chunks else "无可用分块结果"
+        yield {"error": f"分析结果不足：{seed}"}
+        return
 
     try:
         yield {"stage": "合并分析结果...", "progress": 60}
@@ -355,7 +515,7 @@ async def run_creation_pipeline(
             ),
         )
     except Exception as e:
-        yield {"error": f"合并分析失败：{e}"}
+        yield {"error": f"合并分析失败：{_format_error(e)}"}
         return
 
     yield {"stage": "生成共同记忆文档...", "progress": 76}
@@ -382,7 +542,7 @@ async def run_creation_pipeline(
             ),
         )
     except Exception as e:
-        yield {"error": f"生成文档失败：{e}"}
+        yield {"error": f"生成文档失败：{_format_error(e)}"}
         return
 
     yield {"stage": "生成预览...", "progress": 94}
@@ -402,6 +562,12 @@ async def run_creation_pipeline(
             "memories_content": memories_content,
             "persona_content": persona_content,
             "intake": intake,
+            "analysis_warnings": {
+                "failed_chunks": len(failed_chunks),
+                "failed_chunks_limit": max_failed_chunks,
+                "auto_split_rounds": auto_split_rounds,
+                "sample_errors": failed_chunks[:3],
+            },
         }
     }
 
