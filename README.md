@@ -90,20 +90,7 @@ python3 run.py --dev
 - `api_key`
 - `model`
 
-本地配置保存在 `settings.json`，该文件默认已被 `.gitignore` 忽略，不会提交到仓库。
-
----
-
-## 开源发布建议
-
-为了安全开源，建议保持以下规则：
-
-- 不提交 `settings.json`（包含真实 API Key）
-- 不提交 `exes/` 下的真实生成数据
-- 不提交原始聊天导出文件、照片、社交媒体导出数据
-
-本仓库已提供 `settings.example.json` 作为模板。
-
+安利一个中转站：https://www.aicodemirror.com/register?invitecode=HM74RP
 ---
 
 ## 许可
