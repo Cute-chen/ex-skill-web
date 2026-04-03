@@ -101,6 +101,32 @@ python3 run.py --dev
 
 ---
 
+## 最推荐使用方式（先跑上游再迁移）
+
+如果你已经在使用上游 [perkfly/ex-skill](https://github.com/perkfly/ex-skill)，最推荐的方式是：
+
+1. 先在 Claude / Claude Code 中运行上游 Skill，完成记忆构建。
+2. 拿到上游生成的 `exes` 目录（里面包含每个角色的 `meta.json`、`memories.md`、`persona.md`、`SKILL.md` 等文件）。
+3. 将这个 `exes` 目录直接复制到本项目根目录（覆盖或合并本项目的 `exes/`）。
+4. 启动本项目后，即可在 Web 中直接看到这些角色并开始对话，无需重新导入材料。
+
+示例结构：
+
+```text
+ex-web/
+├── exes/
+│   ├── ta/
+│   │   ├── meta.json
+│   │   ├── memories.md
+│   │   ├── persona.md
+│   │   ├── SKILL.md
+│   │   └── ...
+│   └── ...
+└── ...
+```
+
+---
+
 ## 配置说明
 
 首次启动后在 Web 设置页填写：
