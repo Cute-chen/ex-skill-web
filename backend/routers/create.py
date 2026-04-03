@@ -28,7 +28,7 @@ class CreateBody(BaseModel):
     personality: str = ""
     materials: list[str] = []  # list of pre-parsed text blobs
     materials_labels: list[str] = []
-    analysis_mode: str = "fidelity"  # fidelity | fast
+    analysis_mode: str = "direct"  # direct | fast | fidelity
 
 
 class ConfirmBody(BaseModel):
@@ -116,7 +116,7 @@ def _init_processing_ex(slug: str, body: CreateBody, job_id: str):
         "build_stage": "任务已创建",
         "build_error": "",
         "job_id": job_id,
-        "analysis_mode": (body.analysis_mode or "fidelity").strip().lower(),
+        "analysis_mode": (body.analysis_mode or "direct").strip().lower(),
     }
     _write_meta(slug, meta)
 
@@ -151,9 +151,9 @@ def _preview_path(slug: str) -> Path:
 @router.post("/api/create")
 async def create_ex_stream(body: CreateBody):
     client = get_client()
-    analysis_mode = (body.analysis_mode or "fidelity").strip().lower()
-    if analysis_mode not in {"fidelity", "fast"}:
-        analysis_mode = "fidelity"
+    analysis_mode = (body.analysis_mode or "direct").strip().lower()
+    if analysis_mode not in {"direct", "fast", "fidelity"}:
+        analysis_mode = "direct"
     intake = {
         "name": body.name,
         "basic_info": body.basic_info,
@@ -182,9 +182,9 @@ async def _run_create_job(job_id: str, slug: str, body: CreateBody):
         "personality": body.personality,
     }
     labels = body.materials_labels or []
-    analysis_mode = (body.analysis_mode or "fidelity").strip().lower()
-    if analysis_mode not in {"fidelity", "fast"}:
-        analysis_mode = "fidelity"
+    analysis_mode = (body.analysis_mode or "direct").strip().lower()
+    if analysis_mode not in {"direct", "fast", "fidelity"}:
+        analysis_mode = "direct"
 
     await create_jobs.update_job(
         job_id,
@@ -321,9 +321,9 @@ async def _run_create_job(job_id: str, slug: str, body: CreateBody):
 
 @router.post("/api/create/jobs")
 async def create_job(body: CreateBody):
-    analysis_mode = (body.analysis_mode or "fidelity").strip().lower()
-    if analysis_mode not in {"fidelity", "fast"}:
-        analysis_mode = "fidelity"
+    analysis_mode = (body.analysis_mode or "direct").strip().lower()
+    if analysis_mode not in {"direct", "fast", "fidelity"}:
+        analysis_mode = "direct"
     body.analysis_mode = analysis_mode
 
     slug = _ensure_unique_slug(_slugify(body.name))

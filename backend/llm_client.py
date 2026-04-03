@@ -55,6 +55,14 @@ class ClaudeClient:
         self.base_url = _normalize_base_url(base_url)
         self.api_key = api_key
         self.model = model
+        self._timeout = httpx.Timeout(connect=30, read=600, write=60, pool=10)
+        self._limits = httpx.Limits(max_connections=80, max_keepalive_connections=20, keepalive_expiry=45)
+        self._client: httpx.AsyncClient | None = None
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=self._timeout, limits=self._limits)
+        return self._client
 
     def _headers(self) -> dict:
         return {
@@ -75,16 +83,15 @@ class ClaudeClient:
             "system": system,
             "messages": messages,
         }
-        timeout = httpx.Timeout(connect=30, read=600, write=60, pool=10)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(
-                f"{self.base_url}/v1/messages",
-                headers=self._headers(),
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return _extract_claude_text(data.get("content", []))
+        client = self._http_client()
+        resp = await client.post(
+            f"{self.base_url}/v1/messages",
+            headers=self._headers(),
+            json=payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return _extract_claude_text(data.get("content", []))
 
     async def stream(
         self,
@@ -99,31 +106,30 @@ class ClaudeClient:
             "messages": messages,
             "stream": True,
         }
-        timeout = httpx.Timeout(connect=30, read=600, write=60, pool=10)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream(
-                "POST",
-                f"{self.base_url}/v1/messages",
-                headers=self._headers(),
-                json=payload,
-            ) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    data_str = line[6:]
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        data = json.loads(data_str)
-                    except json.JSONDecodeError:
-                        continue
-                    if data.get("type") == "content_block_delta":
-                        delta = data.get("delta", {})
-                        if delta.get("type") == "text_delta":
-                            text = delta.get("text", "")
-                            if text:
-                                yield text
+        client = self._http_client()
+        async with client.stream(
+            "POST",
+            f"{self.base_url}/v1/messages",
+            headers=self._headers(),
+            json=payload,
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                data_str = line[6:]
+                if data_str == "[DONE]":
+                    break
+                try:
+                    data = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
+                if data.get("type") == "content_block_delta":
+                    delta = data.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        text = delta.get("text", "")
+                        if text:
+                            yield text
 
     async def test_connection(self) -> bool:
         try:
@@ -142,6 +148,14 @@ class OpenAIClient:
         self.base_url = _normalize_base_url(base_url)
         self.api_key = api_key
         self.model = model
+        self._timeout = httpx.Timeout(connect=30, read=600, write=60, pool=10)
+        self._limits = httpx.Limits(max_connections=80, max_keepalive_connections=20, keepalive_expiry=45)
+        self._client: httpx.AsyncClient | None = None
+
+    def _http_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(timeout=self._timeout, limits=self._limits)
+        return self._client
 
     def _headers(self) -> dict:
         return {
@@ -170,20 +184,19 @@ class OpenAIClient:
             "messages": self._build_messages(system, messages),
             "max_tokens": max_tokens,
         }
-        timeout = httpx.Timeout(connect=30, read=600, write=60, pool=10)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(
-                f"{self.base_url}/v1/chat/completions",
-                headers=self._headers(),
-                json=payload,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            choices = data.get("choices") or []
-            if not choices:
-                return ""
-            message = choices[0].get("message", {})
-            return _extract_openai_text(message.get("content"))
+        client = self._http_client()
+        resp = await client.post(
+            f"{self.base_url}/v1/chat/completions",
+            headers=self._headers(),
+            json=payload,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        choices = data.get("choices") or []
+        if not choices:
+            return ""
+        message = choices[0].get("message", {})
+        return _extract_openai_text(message.get("content"))
 
     async def stream(
         self,
@@ -197,33 +210,32 @@ class OpenAIClient:
             "max_tokens": max_tokens,
             "stream": True,
         }
-        timeout = httpx.Timeout(connect=30, read=600, write=60, pool=10)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            async with client.stream(
-                "POST",
-                f"{self.base_url}/v1/chat/completions",
-                headers=self._headers(),
-                json=payload,
-            ) as resp:
-                resp.raise_for_status()
-                async for line in resp.aiter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    data_str = line[6:].strip()
-                    if data_str == "[DONE]":
-                        break
-                    try:
-                        data = json.loads(data_str)
-                    except json.JSONDecodeError:
-                        continue
+        client = self._http_client()
+        async with client.stream(
+            "POST",
+            f"{self.base_url}/v1/chat/completions",
+            headers=self._headers(),
+            json=payload,
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                data_str = line[6:].strip()
+                if data_str == "[DONE]":
+                    break
+                try:
+                    data = json.loads(data_str)
+                except json.JSONDecodeError:
+                    continue
 
-                    choices = data.get("choices") or []
-                    if not choices:
-                        continue
-                    delta = choices[0].get("delta", {})
-                    text = _extract_openai_text(delta.get("content"))
-                    if text:
-                        yield text
+                choices = data.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta", {})
+                text = _extract_openai_text(delta.get("content"))
+                if text:
+                    yield text
 
     async def test_connection(self) -> bool:
         try:

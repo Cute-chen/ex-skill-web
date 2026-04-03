@@ -25,6 +25,11 @@ _MIN_RETRY_CHUNK_CHAR_SIZE = 1_800
 _MAX_AUTO_SPLIT_DEPTH = 2
 _MIN_ALLOWED_FAILED_CHUNKS = 2
 _MAX_ALLOWED_FAILED_CHUNKS = 12
+_LARGE_TEXT_THRESHOLD = 600_000
+_XL_TEXT_THRESHOLD = 1_200_000
+_DIRECT_TOTAL_CHAR_BUDGET = 180_000
+_DIRECT_MAX_PER_MATERIAL_CHAR_BUDGET = 60_000
+_DIRECT_MIN_PER_MATERIAL_CHAR_BUDGET = 14_000
 
 
 def _split_text_chunks(text: str, size: int = _CHUNK_CHAR_SIZE, overlap: int = _CHUNK_OVERLAP) -> list[str]:
@@ -146,6 +151,120 @@ def _split_for_retry(text: str) -> list[str]:
     return _split_text_chunks(clean, size=retry_size, overlap=retry_overlap)
 
 
+def _select_chunking_params(mode: str, total_chars: int) -> tuple[int, int]:
+    if mode == "fast":
+        if total_chars >= _XL_TEXT_THRESHOLD:
+            return 20_000, 500
+        if total_chars >= _LARGE_TEXT_THRESHOLD:
+            return 15_000, 400
+        return _FAST_CHUNK_CHAR_SIZE, _FAST_CHUNK_OVERLAP
+
+    if total_chars >= _XL_TEXT_THRESHOLD:
+        return 12_000, 600
+    if total_chars >= _LARGE_TEXT_THRESHOLD:
+        return 9_000, 500
+    return _CHUNK_CHAR_SIZE, _CHUNK_OVERLAP
+
+
+def _select_merge_group(mode: str, total_chunks: int) -> int:
+    if mode == "fast":
+        if total_chunks >= 180:
+            return 6
+        return 4
+
+    if total_chunks >= 120:
+        return 4
+    return 2
+
+
+def _compress_text_for_direct(text: str, max_chars: int) -> str:
+    clean = (text or "").strip()
+    if not clean or max_chars <= 0:
+        return ""
+    if len(clean) <= max_chars:
+        return clean
+
+    # 保留头尾 + 中段抽样，尽量覆盖不同时间段的内容
+    head = min(24_000, max_chars // 3)
+    tail = min(24_000, max_chars // 3)
+    middle_budget = max_chars - head - tail
+    if middle_budget <= 0:
+        return clean[:max_chars]
+
+    core_start = head
+    core_end = max(core_start, len(clean) - tail)
+    core_len = core_end - core_start
+    if core_len <= 0:
+        return (clean[:head] + "\n\n...\n\n" + clean[-tail:])[:max_chars]
+
+    samples = max(1, min(6, middle_budget // 6_000))
+    window = max(2_000, middle_budget // samples)
+    mids: list[str] = []
+    step = core_len / (samples + 1)
+    for i in range(samples):
+        center = core_start + int((i + 1) * step)
+        s = max(core_start, center - window // 2)
+        e = min(core_end, s + window)
+        if e > s:
+            mids.append(clean[s:e])
+
+    marker = "\n\n...[中段抽样]...\n\n"
+    merged = clean[:head]
+    if mids:
+        merged += marker + marker.join(mids)
+    merged += marker + clean[-tail:]
+    return merged[:max_chars]
+
+
+def _build_direct_input(base_input: str, materials: list[str]) -> tuple[str, dict]:
+    non_empty = [(m or "").strip() for m in materials if (m or "").strip()]
+    if not non_empty:
+        return base_input, {
+            "raw_chars": 0,
+            "used_chars": len(base_input),
+            "truncated_materials": 0,
+            "material_count": 0,
+            "per_material_budget": 0,
+        }
+
+    per_budget = max(
+        _DIRECT_MIN_PER_MATERIAL_CHAR_BUDGET,
+        min(
+            _DIRECT_MAX_PER_MATERIAL_CHAR_BUDGET,
+            _DIRECT_TOTAL_CHAR_BUDGET // max(1, len(non_empty)),
+        ),
+    )
+    blocks: list[str] = []
+    raw_chars = 0
+    used_chars = 0
+    truncated_materials = 0
+
+    for idx, text in enumerate(non_empty, start=1):
+        raw = len(text)
+        raw_chars += raw
+        compact = _compress_text_for_direct(text, per_budget)
+        used_chars += len(compact)
+        if len(compact) < raw:
+            truncated_materials += 1
+        blocks.append(
+            f"原材料{idx}（原始 {raw} 字，送审 {len(compact)} 字）：\n{compact}"
+        )
+
+    body = (
+        f"{base_input}\n\n"
+        "以下是原材料汇总（已自动压缩采样以提升速度）：\n\n"
+        + "\n\n----\n\n".join(blocks)
+    )
+    final_input = _compress_text_for_direct(body, _DIRECT_TOTAL_CHAR_BUDGET)
+    return final_input, {
+        "raw_chars": raw_chars,
+        "used_chars": len(final_input),
+        "truncated_materials": truncated_materials,
+        "material_count": len(non_empty),
+        "per_material_budget": per_budget,
+    }
+
+
 async def _analyze_chunk_once(
     client,
     *,
@@ -156,7 +275,7 @@ async def _analyze_chunk_once(
     dual_fast_prompt: str,
     fallback_depth: int = 0,
 ) -> tuple[list[str], list[str]]:
-    if mode == "fast":
+    if mode in {"fast", "direct"}:
         combined_piece = await _complete_with_retry(
             client,
             system=dual_fast_prompt,
@@ -381,7 +500,7 @@ async def run_creation_pipeline(
     materials: list[str],
     client,
     base_dir: Path,
-    analysis_mode: str = "fidelity",
+    analysis_mode: str = "direct",
 ) -> AsyncGenerator[dict, None]:
     """
     intake: {name, basic_info, personality}
@@ -394,28 +513,40 @@ async def run_creation_pipeline(
     basic_info = intake.get("basic_info", "")
     personality = intake.get("personality", "")
     slug = _slugify(name)
-    mode = (analysis_mode or "fidelity").strip().lower()
-    if mode not in {"fidelity", "fast"}:
-        mode = "fidelity"
+    mode = (analysis_mode or "direct").strip().lower()
+    if mode not in {"fidelity", "fast", "direct"}:
+        mode = "direct"
 
     base_input = f"昵称：{name}\n基本信息：{basic_info}\n性格画像：{personality}"
     memories_analyzer = load_prompt("memories_analyzer.md")
     persona_analyzer = load_prompt("persona_analyzer.md")
-    chunk_size = _FAST_CHUNK_CHAR_SIZE if mode == "fast" else _CHUNK_CHAR_SIZE
-    chunk_overlap = _FAST_CHUNK_OVERLAP if mode == "fast" else _CHUNK_OVERLAP
-    material_chunks = _build_material_chunks(
-        materials,
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-    )
+    non_empty_materials = [(m or "").strip() for m in materials if (m or "").strip()]
+    total_chars = sum(len(m) for m in non_empty_materials)
+    chunk_size = 0
+    chunk_overlap = 0
+    material_chunks: list[dict] = []
+    if mode != "direct":
+        chunk_size, chunk_overlap = _select_chunking_params(mode, total_chars)
+        material_chunks = _build_material_chunks(
+            materials,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+        )
 
     chunk_memories: list[str] = []
     chunk_personas: list[str] = []
     failed_chunks: list[str] = []
     auto_split_rounds = 0
     max_failed_chunks = 0
+    direct_stats = {
+        "raw_chars": total_chars,
+        "used_chars": 0,
+        "truncated_materials": 0,
+        "material_count": len(non_empty_materials),
+        "per_material_budget": 0,
+    }
 
-    if not material_chunks:
+    if not non_empty_materials:
         # 没有原材料时，仍允许仅根据 intake 生成
         try:
             yield {"stage": "分析共同记忆...", "progress": 12}
@@ -440,9 +571,62 @@ async def run_creation_pipeline(
         except Exception as e:
             yield {"error": f"分析性格失败：{_format_error(e)}"}
             return
+    elif mode == "direct":
+        dual_fast_prompt = _fast_dual_prompt()
+        direct_input, direct_stats = _build_direct_input(base_input, non_empty_materials)
+        yield {
+            "stage": (
+                f"Claude 同款直连模式：原始 {direct_stats['raw_chars']} 字，"
+                f"送审 {direct_stats['used_chars']} 字"
+            ),
+            "progress": 8,
+        }
+        try:
+            combined_piece = await _complete_with_retry(
+                client,
+                system=dual_fast_prompt,
+                messages=[{"role": "user", "content": direct_input}],
+                max_tokens=3800,
+            )
+            memories_piece, persona_piece = _parse_fast_dual_result(combined_piece)
+            if not memories_piece or not persona_piece:
+                raise ValueError("双通道输出不完整")
+            chunk_memories.append(memories_piece)
+            chunk_personas.append(persona_piece)
+        except Exception as e:
+            # 回退补偿：若单次双通道失败，退回双分析器并行
+            yield {"stage": "直连主通道抖动，切换补偿分析...", "progress": 20}
+            try:
+                memories_piece, persona_piece = await asyncio.gather(
+                    _complete_with_retry(
+                        client,
+                        system=memories_analyzer,
+                        messages=[{"role": "user", "content": direct_input}],
+                        max_tokens=4096,
+                    ),
+                    _complete_with_retry(
+                        client,
+                        system=persona_analyzer,
+                        messages=[{"role": "user", "content": direct_input}],
+                        max_tokens=4096,
+                    ),
+                )
+                chunk_memories.append(memories_piece)
+                chunk_personas.append(persona_piece)
+                failed_chunks.append(f"直连主通道失败已补偿：{_format_error(e)}")
+            except Exception as final_err:
+                yield {"error": f"直连分析失败：{_format_error(final_err)}"}
+                return
     else:
         total_chunks = len(material_chunks)
         dual_fast_prompt = _fast_dual_prompt() if mode == "fast" else ""
+        yield {
+            "stage": (
+                f"已加载 {total_chars} 字，分块 {total_chunks} 块 "
+                f"(size={chunk_size}, overlap={chunk_overlap})"
+            ),
+            "progress": 6,
+        }
         max_failed_chunks = _allowed_failed_chunks(total_chunks)
         for idx, chunk in enumerate(material_chunks, start=1):
             progress = 8 + int((idx - 1) / max(total_chunks, 1) * 42)
@@ -496,7 +680,7 @@ async def run_creation_pipeline(
 
     try:
         yield {"stage": "合并分析结果...", "progress": 60}
-        merge_group = 4 if mode == "fast" else 2
+        merge_group = _select_merge_group(mode, len(chunk_memories))
         merge_tokens = 2800 if mode == "fast" else 4096
         memories_raw, persona_raw = await asyncio.gather(
             _merge_analyses_in_rounds(
@@ -563,9 +747,15 @@ async def run_creation_pipeline(
             "persona_content": persona_content,
             "intake": intake,
             "analysis_warnings": {
+                "mode": mode,
                 "failed_chunks": len(failed_chunks),
                 "failed_chunks_limit": max_failed_chunks,
                 "auto_split_rounds": auto_split_rounds,
+                "total_chars": total_chars,
+                "chunk_size": chunk_size,
+                "chunk_overlap": chunk_overlap,
+                "chunk_count": len(material_chunks),
+                "direct_stats": direct_stats,
                 "sample_errors": failed_chunks[:3],
             },
         }

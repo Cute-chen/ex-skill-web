@@ -179,21 +179,21 @@ def format_output(target: str, extracted: dict) -> str:
         "",
     ]
 
-    for msg in extracted["long_messages"]:
+    for msg in extracted["long_messages"][:120]:
         ts = f"[{msg['timestamp']}] " if msg["timestamp"] else ""
         lines.append(f"{ts}{msg['content']}")
         lines.append("")
 
     lines += ["---", "", "## 情感类消息", ""]
 
-    for msg in extracted["emotional_messages"]:
+    for msg in extracted["emotional_messages"][:150]:
         ts = f"[{msg['timestamp']}] " if msg["timestamp"] else ""
         lines.append(f"{ts}{msg['content']}")
         lines.append("")
 
     lines += ["---", "", "## 日常沟通（风格参考）", ""]
 
-    for msg in extracted["daily_messages"]:
+    for msg in extracted["daily_messages"][:100]:
         ts = f"[{msg['timestamp']}] " if msg["timestamp"] else ""
         lines.append(f"{ts}{msg['content']}")
 

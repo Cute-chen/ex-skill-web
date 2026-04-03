@@ -15,7 +15,7 @@ export default function Create() {
     name: '',
     basic_info: '',
     personality: '',
-    analysis_mode: 'fidelity',
+    analysis_mode: 'direct',
   })
   const [materials, setMaterials] = useState([])
   const [analyzeStage, setAnalyzeStage] = useState('')
@@ -93,7 +93,7 @@ export default function Create() {
         personality: intake.personality,
         materials: materialTexts,
         materials_labels: materialLabels,
-        analysis_mode: intake.analysis_mode || 'fidelity',
+        analysis_mode: intake.analysis_mode || 'direct',
       })
 
       const id = res.job_id
@@ -172,7 +172,7 @@ export default function Create() {
             stage={analyzeStage}
             progress={analyzeProgress}
             jobId={jobId}
-            analysisMode={intake.analysis_mode || 'fidelity'}
+            analysisMode={intake.analysis_mode || 'direct'}
           />
         )}
         {step === 3 && previewData && (

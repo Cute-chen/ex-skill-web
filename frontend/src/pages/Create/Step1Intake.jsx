@@ -4,7 +4,7 @@ export default function Step1Intake({ data, onChange, onNext }) {
   }
 
   const canNext = data.name && data.name.trim()
-  const mode = data.analysis_mode || 'fidelity'
+  const mode = data.analysis_mode || 'direct'
 
   return (
     <div>
@@ -53,19 +53,27 @@ export default function Step1Intake({ data, onChange, onNext }) {
         <div className="analysis-mode-grid">
           <button
             type="button"
+            className={`analysis-mode-card${mode === 'direct' ? ' active' : ''}`}
+            onClick={() => set('analysis_mode', 'direct')}
+          >
+            <strong>Claude 同款极速（推荐）</strong>
+            <span>单流程直连分析，速度最快，日常使用优先选这个。</span>
+          </button>
+          <button
+            type="button"
             className={`analysis-mode-card${mode === 'fidelity' ? ' active' : ''}`}
             onClick={() => set('analysis_mode', 'fidelity')}
           >
-            <strong>保真优先加速</strong>
-            <span>更完整保留细节，速度较快，适合重要长期聊天记录。</span>
+            <strong>保真优先</strong>
+            <span>多轮分块分析，细节最完整，但耗时最长。</span>
           </button>
           <button
             type="button"
             className={`analysis-mode-card${mode === 'fast' ? ' active' : ''}`}
             onClick={() => set('analysis_mode', 'fast')}
           >
-            <strong>极限速度（可少量损失细节）</strong>
-            <span>更少轮数和更大分块，速度更快，适合先快速产出可用版本。</span>
+            <strong>快速分块</strong>
+            <span>大分块+少轮合并，速度和细节均衡。</span>
           </button>
         </div>
         <div className="field-help">

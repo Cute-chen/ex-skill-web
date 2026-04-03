@@ -223,7 +223,7 @@ def format_output(target: str, posts: list[dict]) -> str:
 
     lines += ["## 长帖子（观点/情感类，权重最高）", ""]
 
-    for p in long_posts:
+    for p in long_posts[:160]:
         date_str = f"[{p['date']}] " if p["date"] else ""
         platform = f"({p['platform']}) " if p.get("platform") else ""
         lines.append(f"{date_str}{platform}{p['text']}")
@@ -231,7 +231,7 @@ def format_output(target: str, posts: list[dict]) -> str:
 
     lines += ["---", "", "## 短帖子（日常/风格参考）", ""]
 
-    for p in short_posts:
+    for p in short_posts[:100]:
         date_str = f"[{p['date']}] " if p["date"] else ""
         platform = f"({p['platform']}) " if p.get("platform") else ""
         lines.append(f"{date_str}{platform}{p['text']}")

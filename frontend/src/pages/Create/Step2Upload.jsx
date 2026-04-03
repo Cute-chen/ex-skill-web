@@ -64,6 +64,9 @@ export default function Step2Upload({ materials, onChange, onNext, onBack }) {
   }
 
   async function handleFile(type, files, extra = {}) {
+    if (['wechat', 'imessage', 'sms'].includes(type) && !targetName.trim()) {
+      toast('建议填写“她的名字/备注”，可显著加速并提升准确度。', 'info')
+    }
     setLoading2(type, true)
     try {
       let result
@@ -105,11 +108,11 @@ export default function Step2Upload({ materials, onChange, onNext, onBack }) {
 
       {/* Target name */}
       <div className="field">
-        <label>她的名字 / 备注（用于筛选消息）</label>
+        <label>她的名字 / 备注（强烈建议填写，可显著提速）</label>
         <input
           value={targetName}
           onChange={e => setTargetName(e.target.value)}
-          placeholder="可选，留空解析全部消息"
+          placeholder="例如：陈裕婷 / 婷婷（留空会放宽筛选）"
           style={{ maxWidth: 300 }}
         />
       </div>

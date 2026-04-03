@@ -1,5 +1,9 @@
 export default function Step3Analyzing({ stage, progress, jobId, analysisMode }) {
-  const modeLabel = analysisMode === 'fast' ? '极限速度（允许少量细节损失）' : '保真优先加速'
+  const modeLabel = analysisMode === 'direct'
+    ? 'Claude 同款极速'
+    : analysisMode === 'fast'
+      ? '快速分块'
+      : '保真优先'
   return (
     <div style={{ textAlign: 'center', padding: '60px 0' }}>
       <div style={{ fontSize: 40, marginBottom: 20 }}>

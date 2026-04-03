@@ -86,7 +86,7 @@ def list_exes():
                     "tags": meta.get("tags", {}),
                     "impression": meta.get("impression", ""),
                     "corrections_count": meta.get("corrections_count", 0),
-                    "analysis_mode": meta.get("analysis_mode", "fidelity"),
+                    "analysis_mode": meta.get("analysis_mode", "direct"),
                     "build_status": meta.get("build_status", "ready"),
                     "build_progress": meta.get("build_progress", 100),
                     "build_stage": meta.get("build_stage", ""),

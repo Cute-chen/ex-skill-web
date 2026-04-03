@@ -222,7 +222,7 @@ def format_output(target_name: str, extracted: dict) -> str:
         "",
     ]
 
-    for msg in extracted["long_messages"]:
+    for msg in extracted["long_messages"][:220]:
         ts = f"[{msg['timestamp']}] " if msg["timestamp"] else ""
         lines.append(f"{ts}{msg['content']}")
         lines.append("")
@@ -234,7 +234,7 @@ def format_output(target_name: str, extracted: dict) -> str:
         "",
     ]
 
-    for msg in extracted["emotional_messages"]:
+    for msg in extracted["emotional_messages"][:280]:
         ts = f"[{msg['timestamp']}] " if msg["timestamp"] else ""
         lines.append(f"{ts}{msg['content']}")
         lines.append("")
@@ -246,7 +246,7 @@ def format_output(target_name: str, extracted: dict) -> str:
         "",
     ]
 
-    for msg in extracted["daily_messages"]:
+    for msg in extracted["daily_messages"][:200]:
         ts = f"[{msg['timestamp']}] " if msg["timestamp"] else ""
         lines.append(f"{ts}{msg['content']}")
 

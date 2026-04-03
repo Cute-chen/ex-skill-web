@@ -279,7 +279,11 @@ export default function ExDetail() {
             <div><span style={{ color: 'var(--text2)' }}>版本：</span>{meta.version}</div>
             <div>
               <span style={{ color: 'var(--text2)' }}>分析策略：</span>
-              {meta.analysis_mode === 'fast' ? '极限速度' : '保真优先'}
+              {meta.analysis_mode === 'direct'
+                ? 'Claude 同款极速'
+                : meta.analysis_mode === 'fast'
+                  ? '快速分块'
+                  : '保真优先'}
             </div>
             <div><span style={{ color: 'var(--text2)' }}>纠正次数：</span>{meta.corrections_count}</div>
           </div>
